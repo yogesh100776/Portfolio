@@ -87,6 +87,8 @@ const EXCLUDE_DIRS = new Set([".git", ".github", "node_modules", "__pycache__", 
 const EXCLUDE_FILES = new Set([".gitignore", ".DS_Store", "Thumbs.db"]);
 const LICENSE_FILE_RE = /^licen[cs]e(\..+)?$/i;
 
+const UNWANTED_HEADING_RE = /\b(licen[cs]e|authors?|contacts?|get in touch|connect|social|external links|credits?|about the author)\b/i;
+
 const AUTHOR_PATTERNS = [
   /\bAbhishek\s+Kumar\s+Gond\b/gi,
   /\babhi-iitg\b/gi,
@@ -96,6 +98,21 @@ const AUTHOR_PATTERNS = [
   /\bJamieChristian22\b/gi,
   /\bfarhansadeed\b/gi,
   /\bFarhan\s+Sadeed\b/gi,
+];
+
+const REMOVE_LINE_PATTERNS = [
+  /^\s*#{0,6}\s*licen[cs]e\b.*$/i,
+  /released under the\b.*licen[cs]e/i,
+  /\b(mit|apache|gnu|gpl|bsd|isc|cc-by)\s+licen[cs]e\b/i,
+  /\blicen[cs]ed under\b/i,
+  /\ball rights reserved\b/i,
+  /\bcopyright\s*(©|\(c\))?/i,
+  /b\.?\s*tech\b.*iit\s+guwahati/i,
+  /\biit\s+guwahati\b/i,
+  /^\s*(\*\*)?author(\*\*)?\s*:?\s*$/i,
+  /^\s*[-*]?\s*(\*\*)?(author|created by|maintained by|contact|email|linkedin|github|twitter|portfolio|website)(\*\*)?\s*:/i,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i,
+  /\b(mailto:|tel:|linkedin\.com|github\.com|twitter\.com|x\.com|streamlit\.app)\b/i,
 ];
 
 const KIND_BY_EXT = {
@@ -117,16 +134,17 @@ const posix = path.posix;
 const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const extOf = (p) => { const b = posix.basename(p); const i = b.lastIndexOf("."); return i > 0 ? b.slice(i + 1).toLowerCase() : ""; };
 
-function stripLicenseSections(md) {
+function stripUnwantedSections(md) {
   const lines = md.split(/\r?\n/);
   const out = [];
   let skipLevel = null;
   for (const line of lines) {
-    const m = line.match(/^(#{1,6})\s+(.*)$/);
+    // Match markdown headings with or without space after # (e.g. "#License" or "## Author")
+    const m = line.match(/^\s*(#{1,6})\s*(.+?)\s*$/);
     if (m) {
       const level = m[1].length;
-      const headingText = m[2].trim();
-      if (/\blicen[cs]e\b/i.test(headingText)) {
+      const headingText = stripMd(m[2]);
+      if (UNWANTED_HEADING_RE.test(headingText)) {
         skipLevel = level;
         continue;
       }
@@ -140,12 +158,20 @@ function stripLicenseSections(md) {
 }
 
 function cleanContent(md) {
-  let out = stripLicenseSections(md);
+  let out = stripUnwantedSections(md);
+  // Remove standalone "Author\n<name>\n<bio>" blocks even without '#'
+  out = out.replace(/^\s*(?:\*\*)?Author(?:\*\*)?\s*\r?\n(?:[^\r\n]+\r?\n?){1,3}/gim, "");
+  // Filter out license, contact, bio, and external-profile lines
+  out = out
+    .split(/\r?\n/)
+    .filter((line) => !REMOVE_LINE_PATTERNS.some((re) => re.test(line)))
+    .join("\n");
+  // Replace any remaining author names/handles with Yogesh
   for (const re of AUTHOR_PATTERNS) {
     out = out.replace(re, "Yogesh");
   }
-  // Remove standalone license notice lines (e.g., MIT/Apache/Copyright footers)
-  out = out.replace(/^.*(?:licensed under|mit license|apache license|all rights reserved|license\.md|\[license\]).*$/gim, "");
+  // Remove raw bare external URLs (http/https) left in prose
+  out = out.replace(/https?:\/\/[^\s)>"']+/gi, "");
   return out;
 }
 
@@ -318,24 +344,31 @@ for (const meta of PROJECTS) {
 
   function rewriteHtml(html, docPath) {
     const docDir = posix.dirname(docPath) === "." ? "" : posix.dirname(docPath);
-    // images
+    // images (remove external badge/profile images, keep local project images)
     html = html.replace(/<img\b([^>]*?)\bsrc="([^"]*)"([^>]*)>/gi, (m, a, src, b) => {
       const r = resolve(docDir, src, docPath);
-      if (r.type === "external") return `<img${a}src="${esc(r.href)}"${b} loading="lazy" referrerpolicy="no-referrer">`;
+      if (r.type === "external") return "";
       if (r.type === "file") return `<img${a}src="${esc(r.entry.url)}"${b} loading="lazy" data-zoom="1">`;
       return `<span class="md-missing">[image unavailable]</span>`;
     });
-    // links
-    html = html.replace(/<a\b([^>]*?)\bhref="([^"]*)"([^>]*)>/gi, (m, a, href, b) => {
+    // links — strip every external/contact/license link completely (unwrap plain text if meaningful)
+    html = html.replace(/<a\b([^>]*?)\bhref="([^"]*)"([^>]*)>([\s\S]*?)<\/a>/gi, (m, a, href, b, inner) => {
       const rest = `${a}${b}`.replace(/\s*target="[^"]*"/g, "").replace(/\s*rel="[^"]*"/g, "");
       const r = resolve(docDir, href, docPath);
       switch (r.type) {
-        case "external": return `<a${rest} href="${esc(r.href)}" target="_blank" rel="noopener noreferrer" class="ext">`;
-        case "anchor": return `<a${rest} href="${esc(docRoute(docPath, r.anchor))}" data-anchor="${esc(r.anchor)}">`;
-        case "doc": return `<a${rest} href="${esc(docRoute(r.path, r.anchor))}">`;
-        case "file": return `<a${rest} href="${esc(fileRoute(r.path))}">`;
-        case "dir": return `<a${rest} href="${esc(dirRoute(r.path))}">`;
-        default: return `<a${rest} class="md-broken" title="This link points to a file that is not in the project folder" tabindex="-1">`;
+        case "external": {
+          const text = stripMd(inner);
+          if (!text || /^(https?:|mailto:|tel:|github|linkedin|twitter|email|contact|licen[cs]e|mit|streamlit|portfolio)/i.test(text)) return "";
+          return text;
+        }
+        case "anchor": return `<a${rest} href="${esc(docRoute(docPath, r.anchor))}" data-anchor="${esc(r.anchor)}">${inner}</a>`;
+        case "doc": return `<a${rest} href="${esc(docRoute(r.path, r.anchor))}">${inner}</a>`;
+        case "file": return `<a${rest} href="${esc(fileRoute(r.path))}">${inner}</a>`;
+        case "dir": return `<a${rest} href="${esc(dirRoute(r.path))}">${inner}</a>`;
+        default: {
+          if (/licen[cs]e/i.test(href)) return "";
+          return `<a${rest} class="md-broken" title="This link points to a file that is not in the project folder" tabindex="-1">${inner}</a>`;
+        }
       }
     });
     return html;
@@ -460,9 +493,12 @@ const totals = result.projects.reduce((t, p) => {
 }, {});
 result.totals = totals;
 
-const js = `/* Generated by build/build.mjs — do not edit by hand. */\nwindow.PORTFOLIO = ${JSON.stringify(result)};\n`;
+const js = `/* Generated by build/build.mjs — do not edit by hand. */
+window.PORTFOLIO = ${JSON.stringify(result)};
+`;
 fs.writeFileSync(path.join(OUT_DATA, "portfolio.js"), js);
-console.log(`\nCopied ${report.copied} files (${(report.bytes / 1048576).toFixed(1)} MB). Data: ${(js.length / 1048576).toFixed(2)} MB`);
+
+console.log(`\nCopied ${report.copied} files (${(report.bytes / 1048576).toFixed(1)} MB).`);
 console.log("Totals:", totals);
 if (report.broken.length) {
   console.log(`\n⚠ ${report.broken.length} link(s) in the source docs point to files that do not exist in the folders:`);

@@ -7,7 +7,8 @@
   const DATA = window.PORTFOLIO;
   const app = document.getElementById("app");
   if (!DATA || !app) {
-    if (app) app.innerHTML = '<div class="nf"><div><h1 class="h-display h-lg">Data missing</h1><p class="lead">Run <code>node build/build.mjs</code> to generate <code>data/portfolio.js</code>.</p></div></div>';
+    if (app) app.innerHTML = '<div class="nf"><div><h1 class="h-display h-lg">No content</h1><p class="lead">There is nothing to show yet.</p></div></div>';
+    if (window.FX && window.FX.preload) window.FX.preload(); else { const pl = document.getElementById("preloader"); if (pl) pl.remove(); }
     return;
   }
 
